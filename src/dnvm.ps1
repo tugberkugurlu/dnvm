@@ -1,4 +1,5 @@
 #Requires -Version 3
+Import-Module BitsTransfer 
 
 $ScriptPath = $MyInvocation.MyCommand.Definition
 
@@ -445,11 +446,32 @@ function Download-Package(
     $url = "$Feed/package/" + (Get-RuntimeId $Architecture $Runtime) + "/" + $Version
     
     _WriteOut "Downloading $runtimeFullName from $feed"
-
     $wc = New-Object System.Net.WebClient
-    Apply-Proxy $wc -Proxy:$Proxy
-    _WriteDebug "Downloading $url ..."
-    $wc.DownloadFile($url, $DestinationFile)
+    Try {
+      Apply-Proxy $wc -Proxy:$Proxy
+      _WriteDebug "Downloading $url ..."
+      Register-ObjectEvent $wc DownloadProgressChanged -SourceIdentifier WebClient.ProgressChanged -action {     
+        Write-Progress -Activity "Downloading" -Status `
+          ("{0} of {1} ({2}%)" -f $eventargs.BytesReceived, $eventargs.TotalBytesToReceive, $eventargs.ProgressPercentage)`
+          -PercentComplete $eventargs.ProgressPercentage    
+      } | Out-Null
+
+      Register-ObjectEvent $wc DownloadFileCompleted -SourceIdentifier WebClient.ProgressComplete -action {
+        Write-Progress -Activity "Downloading" -Status "Completed" -Completed
+        New-Event -SourceIdentifier DownloadComplete -EventArguments $eventargs
+      } | Out-Null
+
+      $wc.DownloadFileAsync($url, $DestinationFile)
+      $completedEvent = Wait-Event -SourceIdentifier DownloadComplete
+      if($completedEvent.SourceEventArgs.Error){
+        Throw $completedEvent.SourceEventArgs.Error
+      }
+    }
+    Finally {
+        Unregister-Event -SourceIdentifier WebClient.ProgressChanged
+        Unregister-Event -SourceIdentifier WebClient.ProgressComplete
+        $wc.Dispose()
+    }
 }
 
 function Unpack-Package([string]$DownloadFile, [string]$UnpackFolder) {
